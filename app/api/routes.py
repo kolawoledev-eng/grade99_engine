@@ -44,14 +44,27 @@ async def get_subjects(exam: str) -> List[Dict[str, Any]]:
         if not exam_res.data:
             raise HTTPException(status_code=404, detail=f"Exam '{exam}' not found")
         exam_id = exam_res.data[0]["id"]
-        return (
+        rows = (
             supabase.table("subjects")
-            .select("id,name")
+            .select("id,name,display_rank")
             .eq("exam_id", exam_id)
-            .order("name")
             .execute()
             .data
+            or []
         )
+
+        def _sk(r: Dict[str, Any]) -> tuple[int, str]:
+            try:
+                rank = int(r.get("display_rank", 500))
+            except (TypeError, ValueError):
+                rank = 500
+            return (rank, (r.get("name") or "").lower())
+
+        rows.sort(key=_sk)
+        return [
+            {"id": r["id"], "name": r["name"], "display_rank": int(r.get("display_rank") or 500)}
+            for r in rows
+        ]
     except HTTPException:
         raise
     except Exception as exc:

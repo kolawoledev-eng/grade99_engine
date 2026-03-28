@@ -8,6 +8,20 @@ from app.core.db import get_supabase_client
 class SchoolExamsRepository:
     VALID_MODES = {"post-utme", "jupeb"}
 
+    @staticmethod
+    def _sort_institution_subject_rows(rows: List[Dict[str, Any]] | None) -> List[Dict[str, Any]]:
+        out = list(rows or [])
+
+        def key(r: Dict[str, Any]) -> tuple[int, str]:
+            try:
+                rank = int(r.get("display_rank", 500))
+            except (TypeError, ValueError):
+                rank = 500
+            return (rank, (r.get("subject_name") or "").lower())
+
+        out.sort(key=key)
+        return out
+
     def list_institutions(self, exam_mode: str, year: int) -> List[Dict[str, Any]]:
         if exam_mode not in self.VALID_MODES:
             raise ValueError("exam_mode must be 'post-utme' or 'jupeb'")
@@ -53,12 +67,12 @@ class SchoolExamsRepository:
         rows = (
             get_supabase_client()
             .table("institution_subjects")
-            .select("subject_name")
+            .select("subject_name,display_rank")
             .eq("offering_id", offering_id)
-            .order("subject_name")
             .execute()
             .data
         )
+        rows = self._sort_institution_subject_rows(rows)
         return [r["subject_name"] for r in rows]
 
     def list_topics(self, exam_mode: str, institution_name: str, year: int, subject: str) -> List[str]:
