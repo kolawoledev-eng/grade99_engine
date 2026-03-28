@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any, Dict
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import Depends, FastAPI, Header, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.core.config import get_settings, validate_settings
@@ -13,6 +13,7 @@ from app.features.questions.api.routes import router as questions_router
 from app.features.school_exams.api.routes import router as school_exams_router
 from app.features.study_notes.api.routes import router as study_notes_router
 from app.features.topics.api.routes import router as topics_router
+from app.features.tutor.api.routes import router as tutor_router
 
 settings = get_settings()
 validate_settings(settings)
@@ -24,13 +25,21 @@ app = FastAPI(
     description="Tree-based exam learning platform with questions and study notes.",
 )
 
+_cors_origins, _cors_creds = settings.cors_middleware_options()
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
+    allow_origins=_cors_origins,
+    allow_credentials=_cors_creds,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+async def verify_admin_key(x_admin_key: str | None = Header(default=None, alias="X-Admin-Key")) -> None:
+    if not settings.admin_api_key:
+        raise HTTPException(status_code=503, detail="Admin endpoint disabled")
+    if not x_admin_key or x_admin_key != settings.admin_api_key:
+        raise HTTPException(status_code=401, detail="Unauthorized")
 
 
 @app.get("/")
@@ -79,7 +88,7 @@ async def get_user_stats(email: str) -> Dict[str, Any]:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
-@app.get("/api/admin/stats", tags=["admin"])
+@app.get("/api/admin/stats", tags=["admin"], dependencies=[Depends(verify_admin_key)])
 async def get_admin_stats() -> Dict[str, Any]:
     try:
         supabase = get_supabase_client()
@@ -107,4 +116,5 @@ app.include_router(study_notes_router)
 app.include_router(novels_router)
 app.include_router(practice_router)
 app.include_router(school_exams_router)
+app.include_router(tutor_router)
 
