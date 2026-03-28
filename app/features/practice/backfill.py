@@ -52,7 +52,36 @@ def count_national_bucket_total(
         gen_c = r2.count or 0
     except Exception:
         pass
-    return past_c + gen_c
+    total = past_c + gen_c
+    # Match download-pack merge: legacy rows may use subject name "English".
+    if ex == "JAMB" and subject == "Use of English":
+        try:
+            r = (
+                supabase.table("past_questions")
+                .select("id", count="exact")
+                .eq("exam", ex)
+                .eq("year", year)
+                .eq("subject", "English")
+                .eq("difficulty", difficulty)
+                .execute()
+            )
+            total += r.count or 0
+        except Exception:
+            pass
+        try:
+            r2 = (
+                supabase.table("generated_questions")
+                .select("id", count="exact")
+                .eq("exam", ex)
+                .eq("year", year)
+                .eq("subject", "English")
+                .eq("difficulty", difficulty)
+                .execute()
+            )
+            total += r2.count or 0
+        except Exception:
+            pass
+    return total
 
 
 def run_download_pack_backfill(

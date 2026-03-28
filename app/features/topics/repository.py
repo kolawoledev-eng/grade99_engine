@@ -56,6 +56,12 @@ class TopicsRepository:
             .data
         )
         rows = self._sort_subject_rows(rows)
+        # Legacy 002 seed added JAMB "English"; 006 added the brochure name "Use of English".
+        # Hide the duplicate so one subject carries UTME English + merged question packs.
+        if exam.upper() == "JAMB":
+            names = {r.get("name") for r in rows}
+            if "Use of English" in names:
+                rows = [r for r in rows if r.get("name") != "English"]
         return [
             {
                 "id": r["id"],

@@ -25,6 +25,7 @@ def _collect_bucket(
     subject: str,
     difficulty: str,
     limit: int,
+    topic: Optional[str] = None,
 ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
     past: List[Dict[str, Any]] = []
     try:
@@ -36,6 +37,8 @@ def _collect_bucket(
             .eq("subject", subject)
             .eq("difficulty", difficulty)
         )
+        if topic and topic.lower() != "all topics":
+            q = q.eq("topic", topic)
         past = q.limit(limit).execute().data or []
     except Exception:
         past = []
@@ -52,6 +55,8 @@ def _collect_bucket(
                 .eq("subject", subject)
                 .eq("difficulty", difficulty)
             )
+            if topic and topic.lower() != "all topics":
+                q2 = q2.eq("topic", topic)
             gen = q2.limit(need).execute().data or []
         except Exception:
             gen = []
@@ -60,6 +65,48 @@ def _collect_bucket(
         p["source"] = "past"
     for g in gen:
         g["source"] = "generated"
+    return past, gen
+
+
+def _merge_jamb_use_of_english_bucket(
+    supabase: Any,
+    exam: str,
+    year: int,
+    subject: str,
+    difficulty: str,
+    limit: int,
+    topic: Optional[str] = None,
+) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    """
+    If packs were ingested as legacy JAMB subject name \"English\", merge them into Use of English.
+    """
+    past, gen = _collect_bucket(supabase, exam, year, subject, difficulty, limit, topic=topic)
+    if exam.upper() != "JAMB" or subject != "Use of English":
+        return past, gen
+    total = len(past) + len(gen)
+    if total >= limit:
+        return past, gen
+    need = limit - total
+    past2, gen2 = _collect_bucket(supabase, exam, year, "English", difficulty, need, topic=topic)
+    seen = {str(x.get("id", "")) for x in past + gen if x.get("id")}
+    for row in past2:
+        if len(past) + len(gen) >= limit:
+            break
+        uid = str(row.get("id", ""))
+        if uid and uid in seen:
+            continue
+        if uid:
+            seen.add(uid)
+        past.append(row)
+    for row in gen2:
+        if len(past) + len(gen) >= limit:
+            break
+        uid = str(row.get("id", ""))
+        if uid and uid in seen:
+            continue
+        if uid:
+            seen.add(uid)
+        gen.append(row)
     return past, gen
 
 
@@ -77,41 +124,10 @@ async def practice_session(
     """
     try:
         supabase = get_supabase_client()
-        past: List[Dict[str, Any]] = []
-        try:
-            q = (
-                supabase.table("past_questions")
-                .select(_FIELDS + ",source_label")
-                .eq("exam", exam.upper())
-                .eq("year", year)
-                .eq("subject", subject)
-                .eq("difficulty", difficulty)
-            )
-            if topic and topic.lower() != "all topics":
-                q = q.eq("topic", topic)
-            past = q.limit(limit).execute().data or []
-        except Exception:
-            past = []
-
-        need = limit - len(past)
-        gen: List[Dict[str, Any]] = []
-        if need > 0:
-            q2 = (
-                supabase.table("generated_questions")
-                .select(_FIELDS)
-                .eq("exam", exam.upper())
-                .eq("year", year)
-                .eq("subject", subject)
-                .eq("difficulty", difficulty)
-            )
-            if topic and topic.lower() != "all topics":
-                q2 = q2.eq("topic", topic)
-            gen = q2.limit(need).execute().data or []
-
-        for p in past:
-            p["source"] = "past"
-        for g in gen:
-            g["source"] = "generated"
+        exu = exam.upper()
+        past, gen = _merge_jamb_use_of_english_bucket(
+            supabase, exu, year, subject, difficulty, limit, topic=topic
+        )
 
         combined = past + gen
         random.shuffle(combined)
@@ -195,7 +211,9 @@ async def download_pack(
 
         for yr in year_list:
             for diff in diffs:
-                past, gen = _collect_bucket(supabase, ex, yr, subject, diff, limit_per_year_difficulty)
+                past, gen = _merge_jamb_use_of_english_bucket(
+                    supabase, ex, yr, subject, diff, limit_per_year_difficulty, topic=None
+                )
                 for row in past + gen:
                     uid = str(row.get("id", ""))
                     if uid and uid not in seen:
