@@ -8,6 +8,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.core.admin_auth import verify_admin_key
 from app.core.config import get_settings, validate_settings
 from app.core.db import get_supabase_client
+from app.features.classroom.api.admin_routes import router as classroom_admin_router
+from app.features.classroom.api.routes import router as classroom_router
 from app.features.novel_recommendation.api.literature_admin_routes import router as literature_admin_router
 from app.features.novel_recommendation.api.literature_routes import router as literature_public_router
 from app.features.novel_recommendation.api.routes import router as novels_router
@@ -107,6 +109,8 @@ async def get_admin_stats() -> Dict[str, Any]:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
+app.include_router(classroom_router)
+app.include_router(classroom_admin_router)
 app.include_router(topics_router)
 app.include_router(questions_router)
 app.include_router(study_notes_router)
