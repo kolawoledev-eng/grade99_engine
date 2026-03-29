@@ -42,3 +42,51 @@ class StudyNotesRepository:
         )
         return note_set, notes
 
+    def has_notes_for_topic(
+        self,
+        exam: str,
+        year: int,
+        subject: str,
+        topic: str,
+    ) -> bool:
+        supabase = get_supabase_client()
+        ex = exam.upper().strip()
+        res = (
+            supabase.table("study_note_sets")
+            .select("id")
+            .eq("exam", ex)
+            .eq("year", year)
+            .eq("subject", subject)
+            .eq("topic", topic)
+            .limit(1)
+            .execute()
+        )
+        return bool(res.data)
+
+    def delete_notes_for_topic(
+        self,
+        exam: str,
+        year: int,
+        subject: str,
+        topic: str,
+    ) -> int:
+        """Delete all study_note_sets for this scope; study_notes rows cascade."""
+        supabase = get_supabase_client()
+        ex = exam.upper().strip()
+        sel = (
+            supabase.table("study_note_sets")
+            .select("id")
+            .eq("exam", ex)
+            .eq("year", year)
+            .eq("subject", subject)
+            .eq("topic", topic)
+            .execute()
+        )
+        n = len(sel.data or [])
+        if n == 0:
+            return 0
+        supabase.table("study_note_sets").delete().eq("exam", ex).eq("year", year).eq("subject", subject).eq(
+            "topic", topic
+        ).execute()
+        return n
+

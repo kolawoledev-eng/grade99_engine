@@ -1,13 +1,13 @@
 from __future__ import annotations
 
-from typing import Optional
+from typing import List, Literal, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 class GenerateRequest(BaseModel):
     exam: str = Field(..., examples=["waec", "jamb"])
-    year: int = Field(..., ge=2000, le=2100)
+    year: int = Field(default=2025, ge=2000, le=2100)
     subject: str = Field(..., examples=["Physics", "Mathematics"])
     difficulty: str = Field(..., examples=["easy", "medium", "hard"])
     topic: str = Field(default="all topics")
@@ -36,9 +36,53 @@ class StudyNotesGenerateRequest(BaseModel):
     year: int = Field(..., ge=2000, le=2100)
     subject: str = Field(..., examples=["Physics", "Use of English", "History"])
     topic: str = Field(..., examples=["Kinematics", "Comprehension"])
-    min_subtopics: int = Field(default=20, ge=20, le=50)
+    # Classroom target: ~23–29 cards per syllabus topic when generating a full set.
+    min_subtopics: int = Field(default=25, ge=23, le=50)
     read_time_target_minutes: int = Field(default=3, ge=2, le=3)
     user_email: Optional[str] = Field(default=None)
     source_url: Optional[str] = Field(default=None)
+
+
+class PastQuestionRow(BaseModel):
+    """One row for bulk insert into past_questions (licensed past papers)."""
+
+    exam: str
+    year: int = Field(..., ge=2000, le=2100)
+    subject: str
+    difficulty: Literal["easy", "medium", "hard"]
+    topic: str = Field(..., min_length=1, max_length=200)
+    question_text: str = Field(..., min_length=1)
+    option_a: str
+    option_b: str
+    option_c: str
+    option_d: str
+    correct_answer: str
+    explanation: Optional[str] = None
+    source_label: Optional[str] = None
+
+    @field_validator("correct_answer")
+    @classmethod
+    def norm_answer(cls, v: str) -> str:
+        u = v.strip().upper()
+        if u not in ("A", "B", "C", "D"):
+            raise ValueError("correct_answer must be A, B, C, or D")
+        return u
+
+
+class BulkPastQuestionsRequest(BaseModel):
+    questions: List[PastQuestionRow] = Field(default_factory=list)
+
+
+class EnsureBucketsRequest(BaseModel):
+    exam: str
+    year: int = Field(..., ge=2000, le=2100)
+    subject: str
+    target_per_difficulty: int = Field(default=100, ge=1, le=100)
+    max_questions_to_generate: int = Field(default=500, ge=1, le=5000)
+    topics: Optional[List[str]] = Field(
+        default=None,
+        description="If set, only these syllabus topic names (exact match)",
+    )
+    user_email: Optional[str] = None
 
 

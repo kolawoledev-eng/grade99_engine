@@ -2,15 +2,17 @@ from __future__ import annotations
 
 from typing import Any, Dict
 
-from fastapi import Depends, FastAPI, Header, HTTPException, Query
+from fastapi import Depends, FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 
+from app.core.admin_auth import verify_admin_key
 from app.core.config import get_settings, validate_settings
 from app.core.db import get_supabase_client
 from app.features.novel_recommendation.api.routes import router as novels_router
 from app.features.practice.api.routes import router as practice_router
 from app.features.questions.api.routes import router as questions_router
 from app.features.school_exams.api.routes import router as school_exams_router
+from app.features.study_notes.api.admin_routes import router as study_notes_admin_router
 from app.features.study_notes.api.routes import router as study_notes_router
 from app.features.topics.api.routes import router as topics_router
 from app.features.tutor.api.routes import router as tutor_router
@@ -33,13 +35,6 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-
-async def verify_admin_key(x_admin_key: str | None = Header(default=None, alias="X-Admin-Key")) -> None:
-    if not settings.admin_api_key:
-        raise HTTPException(status_code=503, detail="Admin endpoint disabled")
-    if not x_admin_key or x_admin_key != settings.admin_api_key:
-        raise HTTPException(status_code=401, detail="Unauthorized")
 
 
 @app.get("/")
@@ -113,6 +108,7 @@ async def get_admin_stats() -> Dict[str, Any]:
 app.include_router(topics_router)
 app.include_router(questions_router)
 app.include_router(study_notes_router)
+app.include_router(study_notes_admin_router)
 app.include_router(novels_router)
 app.include_router(practice_router)
 app.include_router(school_exams_router)

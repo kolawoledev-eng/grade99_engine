@@ -4,10 +4,14 @@ import os
 import random
 from typing import Any, Dict, List, Optional, Set, Tuple
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 
+from app.core.admin_auth import verify_admin_key
 from app.core.db import get_supabase_client
 from app.features.practice.backfill import run_download_pack_backfill
+from app.features.practice.bucket_ensure import run_ensure_national_buckets
+from app.features.practice.past_ingest import insert_past_questions_batch
+from app.schemas import BulkPastQuestionsRequest, EnsureBucketsRequest, PastQuestionRow
 
 router = APIRouter(prefix="/api/practice", tags=["practice"])
 
@@ -16,6 +20,51 @@ _FIELDS = "id,question_text,option_a,option_b,option_c,option_d,correct_answer,e
 # Default off to avoid mobile timeouts and surprise Claude cost. Set DOWNLOAD_PACK_BACKFILL_DEFAULT=true on the host to opt in.
 _download_bf_env = os.getenv("DOWNLOAD_PACK_BACKFILL_DEFAULT", "").strip().lower()
 DOWNLOAD_PACK_BACKFILL_DEFAULT: bool = _download_bf_env in ("1", "true", "yes")
+
+
+def _past_row_to_db(r: PastQuestionRow) -> Dict[str, Any]:
+    return {
+        "exam": r.exam.strip().upper(),
+        "year": r.year,
+        "subject": r.subject.strip(),
+        "difficulty": r.difficulty,
+        "topic": r.topic.strip(),
+        "question_text": r.question_text.strip(),
+        "option_a": r.option_a.strip(),
+        "option_b": r.option_b.strip(),
+        "option_c": r.option_c.strip(),
+        "option_d": r.option_d.strip(),
+        "correct_answer": r.correct_answer,
+        "explanation": (r.explanation or "").strip() or None,
+        "source_label": (r.source_label or "").strip() or None,
+    }
+
+
+@router.post("/admin/past-questions/bulk", dependencies=[Depends(verify_admin_key)])
+async def bulk_ingest_past_questions(payload: BulkPastQuestionsRequest) -> Dict[str, Any]:
+    """Admin: bulk insert licensed past MCQs into past_questions (header X-Admin-Key)."""
+    if not payload.questions:
+        return {"status": "success", "inserted": 0, "requested": 0, "errors": []}
+    supabase = get_supabase_client()
+    rows = [_past_row_to_db(q) for q in payload.questions]
+    result = insert_past_questions_batch(supabase, rows)
+    return {"status": "success", **result}
+
+
+@router.post("/admin/ensure-buckets", dependencies=[Depends(verify_admin_key)])
+async def ensure_national_buckets(payload: EnsureBucketsRequest) -> Dict[str, Any]:
+    """Admin: top up each syllabus topic × difficulty toward target using AI generation (X-Admin-Key)."""
+    supabase = get_supabase_client()
+    return run_ensure_national_buckets(
+        supabase,
+        exam=payload.exam,
+        year=payload.year,
+        subject=payload.subject,
+        target_per_difficulty=payload.target_per_difficulty,
+        max_questions_to_generate=payload.max_questions_to_generate,
+        topics_filter=payload.topics,
+        user_email=payload.user_email,
+    )
 
 
 def _collect_bucket(

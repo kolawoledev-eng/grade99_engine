@@ -1,0 +1,9 @@
+-- DEPRECATED (March 2026): JAMB Biology granular topics are seeded flat in
+-- 010_jamb_all_subjects_syllabus_topics.sql (34 rows). No SQL to run here.
+--
+-- Optional cleanup if an old migration created parent/child Biology rows:
+--   delete from syllabus_topics st
+--   using subjects s join exams e on e.id = s.exam_id
+--   where st.subject_id = s.id and e.name = 'JAMB' and s.name = 'Biology'
+--     and st.year in (2024, 2025, 2026);
+-- Then apply the Biology block from 010.
