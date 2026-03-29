@@ -8,6 +8,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.core.admin_auth import verify_admin_key
 from app.core.config import get_settings, validate_settings
 from app.core.db import get_supabase_client
+from app.features.novel_recommendation.api.literature_admin_routes import router as literature_admin_router
+from app.features.novel_recommendation.api.literature_routes import router as literature_public_router
 from app.features.novel_recommendation.api.routes import router as novels_router
 from app.features.practice.api.routes import router as practice_router
 from app.features.questions.api.routes import router as questions_router
@@ -110,6 +112,8 @@ app.include_router(questions_router)
 app.include_router(study_notes_router)
 app.include_router(study_notes_admin_router)
 app.include_router(novels_router)
+app.include_router(literature_public_router)
+app.include_router(literature_admin_router)
 app.include_router(practice_router)
 app.include_router(school_exams_router)
 app.include_router(tutor_router)
