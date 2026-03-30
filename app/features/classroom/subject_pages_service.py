@@ -146,7 +146,9 @@ Exam year context: **{year}**
 
 Write **one revision page** for this topic only — not the whole subject.
 
-Audience: SS3; clear English; Nigerian classroom tone is fine. Be syllabus-accurate; do not invent facts.
+Audience: SS3 in Nigeria. Match the style of Nigerian syllabus guides and WAEC/JAMB-friendly textbooks:
+short clear explanations, defined terms in plain language, and exam-relevant points. Use Nigerian classroom English.
+Be syllabus-accurate; do not invent facts or laws.
 
 Return **JSON only** (no markdown fences):
 {{

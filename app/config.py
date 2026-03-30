@@ -23,6 +23,10 @@ class Settings:
     cors_allow_credentials: str = ""
     # GET /api/admin/stats requires matching X-Admin-Key. Empty => endpoint disabled (503).
     admin_api_key: str = ""
+    # Canonical syllabus year for JAMB classroom / aligned clients (env CURRENT_SYLLABUS_YEAR).
+    current_syllabus_year: int = 2026
+    # If set, POST ensure-summary / ensure-topic-page require header X-Generate-Key (same value).
+    public_generate_key: str = ""
 
     @property
     def supabase_key(self) -> str:
@@ -56,6 +60,8 @@ def get_settings() -> Settings:
         cors_allowed_origins=os.getenv("CORS_ALLOWED_ORIGINS", ""),
         cors_allow_credentials=os.getenv("CORS_ALLOW_CREDENTIALS", ""),
         admin_api_key=os.getenv("ADMIN_API_KEY", ""),
+        current_syllabus_year=int(os.getenv("CURRENT_SYLLABUS_YEAR", "2026")),
+        public_generate_key=os.getenv("PUBLIC_GENERATE_KEY", ""),
     )
 
 
