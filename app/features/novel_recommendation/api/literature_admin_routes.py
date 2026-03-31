@@ -19,6 +19,18 @@ class LiteratureBatchBody(BaseModel):
     sleep_seconds: float = Field(default=2.0, ge=0.0, le=120.0)
 
 
+class LiteratureSourceChapter(BaseModel):
+    chapter_number: int = Field(ge=1, le=2000)
+    chapter_title: str = Field(min_length=1, max_length=300)
+    source_text: str = Field(min_length=40)
+    is_approved: bool = True
+
+
+class LiteratureIngestBody(BaseModel):
+    chapters: list[LiteratureSourceChapter] = Field(min_length=1, max_length=2000)
+    source_ref: Optional[str] = Field(default=None, max_length=500)
+
+
 @router.post("/literature/{novel_id}/generate-summary", dependencies=[Depends(verify_admin_key)])
 async def admin_generate_novel_summary(novel_id: int) -> Dict[str, Any]:
     try:
@@ -64,3 +76,36 @@ async def admin_generate_novel_batch(body: LiteratureBatchBody) -> Dict[str, Any
         "failed": failed,
         "errors": errors,
     }
+
+
+@router.post("/literature/{novel_id}/ingest-chapters", dependencies=[Depends(verify_admin_key)])
+async def admin_ingest_literature_chapters(novel_id: int, body: LiteratureIngestBody) -> Dict[str, Any]:
+    repo = LiteratureRepository()
+    try:
+        novel = repo.get_novel(novel_id)
+        if not novel:
+            raise HTTPException(status_code=404, detail="Novel not found")
+        seen: set[int] = set()
+        payload: list[Dict[str, Any]] = []
+        for c in body.chapters:
+            if c.chapter_number in seen:
+                raise HTTPException(status_code=400, detail=f"Duplicate chapter_number: {c.chapter_number}")
+            seen.add(c.chapter_number)
+            payload.append(c.model_dump())
+        payload.sort(key=lambda x: int(x["chapter_number"]))
+        result = repo.replace_source_chapters(
+            novel_id=novel_id,
+            chapters=payload,
+            source_ref=body.source_ref,
+        )
+        return {
+            "status": "success",
+            "novel_id": novel_id,
+            "chapter_count": result["inserted"],
+            "approved_count": result["approved"],
+            "source_ref": body.source_ref,
+        }
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc

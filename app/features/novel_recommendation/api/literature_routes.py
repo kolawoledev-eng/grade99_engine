@@ -12,11 +12,15 @@ router = APIRouter(prefix="/api/novels", tags=["literature"])
 
 
 def _summary_payload(novel: Dict[str, Any], summary: Dict[str, Any], ensure_status: str) -> Dict[str, Any]:
+    sections = summary.get("sections") or []
+    section_count = summary.get("section_count")
+    if not isinstance(section_count, int):
+        section_count = len(sections) if isinstance(sections, list) else 0
     return {
         "status": "success",
         "novel": novel,
-        "section_count": summary.get("section_count"),
-        "sections": summary.get("sections"),
+        "section_count": section_count,
+        "sections": sections,
         "created_at": summary.get("created_at"),
         "ensure_status": ensure_status,
     }

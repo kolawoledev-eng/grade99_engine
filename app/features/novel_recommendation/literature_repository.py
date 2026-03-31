@@ -30,6 +30,18 @@ class LiteratureRepository:
             return None
         return res.data[0]
 
+    def list_source_chapters(self, novel_id: int) -> List[Dict[str, Any]]:
+        res = (
+            get_supabase_client()
+            .table("literature_novel_chapters")
+            .select("chapter_number,chapter_title,source_text")
+            .eq("novel_id", novel_id)
+            .eq("is_approved", True)
+            .order("chapter_number")
+            .execute()
+        )
+        return list(res.data or [])
+
     def get_summary_for_novel(self, novel_id: int) -> Optional[Dict[str, Any]]:
         res = (
             get_supabase_client()
@@ -65,3 +77,29 @@ class LiteratureRepository:
         if not ins.data:
             raise RuntimeError("Failed to insert novel summary")
         return ins.data[0]
+
+    def replace_source_chapters(
+        self,
+        novel_id: int,
+        chapters: List[Dict[str, Any]],
+        source_ref: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        table = get_supabase_client().table("literature_novel_chapters")
+        table.delete().eq("novel_id", novel_id).execute()
+
+        rows: List[Dict[str, Any]] = []
+        for ch in chapters:
+            rows.append(
+                {
+                    "novel_id": novel_id,
+                    "chapter_number": int(ch["chapter_number"]),
+                    "chapter_title": str(ch["chapter_title"]).strip(),
+                    "source_text": str(ch["source_text"]).strip(),
+                    "is_approved": bool(ch.get("is_approved", True)),
+                    "source_ref": source_ref,
+                }
+            )
+        if rows:
+            table.insert(rows).execute()
+        approved = sum(1 for r in rows if r.get("is_approved"))
+        return {"inserted": len(rows), "approved": approved}
