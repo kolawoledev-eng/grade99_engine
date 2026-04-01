@@ -6,10 +6,42 @@ import json
 import secrets
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Optional
+from urllib.error import HTTPError
 from urllib import request as urlrequest
 
 from app.core.config import get_settings
 from app.features.auth.repository import AuthRepository
+
+
+# Synthetic emails we generate server-side (not “real” inboxes).
+_SYNTHETIC_EMAIL_SUFFIXES = (
+    "@campus101.local",
+    "@users.campus101.app",
+    "@phone.campus101.app",
+    "@user.campus101.app",
+)
+
+
+def _flutterwave_customer_email(user: Dict[str, Any]) -> str:
+    """Return an address Flutterwave accepts for `customer.email`.
+
+    **Subscription / activation is always tied to `user_id` and `tx_ref`** (see `meta` and
+    `create_pending_activation`), not to this email. Email is only for the payment gateway.
+
+    We do **not** use one shared address for every user (that breaks reconciliation and some
+    provider rules). If the user has no real email, we use **one default domain** with a
+    **unique local part per user**: ``{user_id}@users.campus101.app``.
+    """
+    raw = (user.get("email") or "").strip()
+    if raw and "@" in raw:
+        lower = raw.lower()
+        if not any(lower.endswith(s) for s in _SYNTHETIC_EMAIL_SUFFIXES):
+            return raw
+    uid = str(user.get("id") or "").strip()
+    if not uid:
+        return "anonymous@users.campus101.app"
+    safe = "".join(c if c.isalnum() or c in "-_" else "_" for c in uid)[:128]
+    return f"{safe}@users.campus101.app"
 
 
 class AuthService:
@@ -170,19 +202,23 @@ class AuthService:
             raise ValueError("Invalid or inactive plan")
 
         tx_ref = f"act_{secrets.token_urlsafe(12)}"
-        amount = int(plan["price_kobo"]) / 100
+        amount = round(int(plan["price_kobo"]) / 100, 2)
         customer_name = f"{user.get('first_name') or ''} {user.get('last_name') or ''}".strip() or "Campus101 User"
-        customer_email = (user.get("email") or "").strip() or f"{user['id']}@campus101.local"
+        customer_email = _flutterwave_customer_email(user)
+        # Flutterwave Standard API expects `phone_number` (not `phonenumber`).
+        customer: Dict[str, Any] = {
+            "email": customer_email,
+            "name": customer_name,
+        }
+        phone = f"{user.get('phone') or ''}".strip()
+        if phone:
+            customer["phone_number"] = phone
         payload = {
             "tx_ref": tx_ref,
             "amount": amount,
             "currency": "NGN",
             "redirect_url": settings.flutterwave_redirect_url,
-            "customer": {
-                "email": customer_email,
-                "phonenumber": user.get("phone") or "",
-                "name": customer_name,
-            },
+            "customer": customer,
             "meta": {
                 "user_id": user["id"],
                 "plan_code": plan["code"],
@@ -204,6 +240,20 @@ class AuthService:
         try:
             with urlrequest.urlopen(req, timeout=30) as res:
                 body = json.loads(res.read().decode("utf-8"))
+        except HTTPError as exc:
+            detail = exc.read().decode("utf-8", errors="replace")
+            try:
+                err_json = json.loads(detail)
+                msg = err_json.get("message") or err_json.get("data")
+                if isinstance(msg, dict):
+                    msg = msg.get("message") or json.dumps(msg)
+                if msg:
+                    raise ValueError(f"Flutterwave: {msg}") from exc
+            except json.JSONDecodeError:
+                pass
+            raise ValueError(
+                f"Flutterwave checkout failed ({exc.code}): {detail[:500] or exc.reason}"
+            ) from exc
         except Exception as exc:
             raise ValueError(f"Flutterwave checkout creation failed: {exc}") from exc
 
