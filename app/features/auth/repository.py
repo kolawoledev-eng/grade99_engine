@@ -131,3 +131,101 @@ class AuthRepository:
             or []
         )
 
+    def get_activation_plan_by_code(self, code: str) -> Optional[Dict[str, Any]]:
+        rows = (
+            get_supabase_client()
+            .table("activation_plans")
+            .select("id,code,name,duration_days,price_kobo,is_active")
+            .eq("code", code)
+            .limit(1)
+            .execute()
+            .data
+            or []
+        )
+        return rows[0] if rows else None
+
+    def get_activation_plan_by_id(self, plan_id: int) -> Optional[Dict[str, Any]]:
+        rows = (
+            get_supabase_client()
+            .table("activation_plans")
+            .select("id,code,name,duration_days,price_kobo,is_active")
+            .eq("id", plan_id)
+            .limit(1)
+            .execute()
+            .data
+            or []
+        )
+        return rows[0] if rows else None
+
+    def create_pending_activation(self, *, user_id: str, plan_id: int, tx_ref: str) -> Dict[str, Any]:
+        rows = (
+            get_supabase_client()
+            .table("user_activations")
+            .insert(
+                {
+                    "user_id": user_id,
+                    "plan_id": plan_id,
+                    "status": "pending",
+                    "provider": "flutterwave",
+                    "provider_reference": tx_ref,
+                }
+            )
+            .execute()
+            .data
+            or []
+        )
+        if not rows:
+            raise ValueError("Failed to create pending activation")
+        return rows[0]
+
+    def get_activation_by_reference(self, tx_ref: str) -> Optional[Dict[str, Any]]:
+        rows = (
+            get_supabase_client()
+            .table("user_activations")
+            .select("id,user_id,plan_id,status,starts_at,ends_at,provider_reference")
+            .eq("provider", "flutterwave")
+            .eq("provider_reference", tx_ref)
+            .order("created_at", desc=True)
+            .limit(1)
+            .execute()
+            .data
+            or []
+        )
+        return rows[0] if rows else None
+
+    def get_latest_active_activation(self, user_id: str) -> Optional[Dict[str, Any]]:
+        rows = (
+            get_supabase_client()
+            .table("user_activations")
+            .select("id,starts_at,ends_at,status")
+            .eq("user_id", user_id)
+            .eq("status", "active")
+            .order("ends_at", desc=True)
+            .limit(1)
+            .execute()
+            .data
+            or []
+        )
+        return rows[0] if rows else None
+
+    def expire_active_activations(self, user_id: str) -> None:
+        get_supabase_client().table("user_activations").update(
+            {"status": "expired", "updated_at": datetime.now(timezone.utc).isoformat()}
+        ).eq("user_id", user_id).eq("status", "active").execute()
+
+    def mark_activation_active(
+        self,
+        *,
+        activation_id: str,
+        starts_at_iso: str,
+        ends_at_iso: str,
+    ) -> None:
+        get_supabase_client().table("user_activations").update(
+            {
+                "status": "active",
+                "starts_at": starts_at_iso,
+                "ends_at": ends_at_iso,
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+            }
+        ).eq("id", activation_id).execute()
+

@@ -502,21 +502,49 @@ async def download_pack(
             )
             backfill_report["enabled"] = True
 
-        for yr in year_list:
-            for diff in diffs:
-                past, gen = _merge_jamb_use_of_english_bucket(
-                    supabase, ex, yr, subject, diff, limit_per_year_difficulty, topic=None
-                )
-                past, gen = _finalize_unique_past_then_generated(
-                    past, gen, limit_per_year_difficulty
-                )
-                for row in past + gen:
-                    fp = _pack_row_fingerprint(row)
-                    if fp in seen:
-                        continue
-                    seen.add(fp)
-                    combined.append(row)
+        def collect_combined() -> List[Dict[str, Any]]:
+            out: List[Dict[str, Any]] = []
+            local_seen: Set[str] = set()
+            for yr in year_list:
+                for diff in diffs:
+                    past, gen = _merge_jamb_use_of_english_bucket(
+                        supabase, ex, yr, subject, diff, limit_per_year_difficulty, topic=None
+                    )
+                    past, gen = _finalize_unique_past_then_generated(
+                        past, gen, limit_per_year_difficulty
+                    )
+                    for row in past + gen:
+                        fp = _pack_row_fingerprint(row)
+                        if fp in local_seen:
+                            continue
+                        local_seen.add(fp)
+                        out.append(row)
+            return out
 
+        combined = collect_combined()
+
+        # Auto-escalate: if caller passed backfill=false but DB is empty,
+        # run backfill once automatically to avoid hard dead-ends.
+        if (
+            not backfill
+            and not combined
+            and backfill_max_per_bucket > 0
+            and backfill_total_cap > 0
+        ):
+            auto_report = run_download_pack_backfill(
+                supabase,
+                exam=ex,
+                subject=subject,
+                years=year_list,
+                limit_per_year_difficulty=limit_per_year_difficulty,
+                backfill_max_per_bucket=backfill_max_per_bucket,
+                backfill_total_cap=backfill_total_cap,
+            )
+            auto_report["enabled"] = True
+            auto_report["auto_triggered"] = True
+            auto_report["reason"] = auto_report.get("reason") or "auto-triggered because initial pack was empty"
+            backfill_report = auto_report
+            combined = collect_combined()
         random.shuffle(combined)
         count = len(combined)
         ready_for_offline = count >= minimum_required

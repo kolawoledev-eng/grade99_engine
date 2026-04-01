@@ -27,6 +27,9 @@ class Settings:
     current_syllabus_year: int = 2026
     # If set, POST ensure-summary / ensure-topic-page require header X-Generate-Key (same value).
     public_generate_key: str = ""
+    flutterwave_secret_key: str = ""
+    flutterwave_secret_hash: str = ""
+    flutterwave_redirect_url: str = ""
 
     @property
     def supabase_key(self) -> str:
@@ -62,6 +65,9 @@ def get_settings() -> Settings:
         admin_api_key=os.getenv("ADMIN_API_KEY", ""),
         current_syllabus_year=int(os.getenv("CURRENT_SYLLABUS_YEAR", "2026")),
         public_generate_key=os.getenv("PUBLIC_GENERATE_KEY", ""),
+        flutterwave_secret_key=os.getenv("FLUTTERWAVE_SECRET_KEY", ""),
+        flutterwave_secret_hash=os.getenv("FLUTTERWAVE_SECRET_HASH", ""),
+        flutterwave_redirect_url=os.getenv("FLUTTERWAVE_REDIRECT_URL", ""),
     )
 
 

@@ -2,10 +2,13 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import json
 import secrets
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Optional
+from urllib import request as urlrequest
 
+from app.core.config import get_settings
 from app.features.auth.repository import AuthRepository
 
 
@@ -153,4 +156,128 @@ class AuthService:
 
     def list_plans(self) -> list[Dict[str, Any]]:
         return self.repo.list_activation_plans()
+
+    def create_flutterwave_checkout(self, *, user: Dict[str, Any], plan_code: str) -> Dict[str, Any]:
+        settings = get_settings()
+        if not settings.flutterwave_secret_key:
+            raise ValueError("Flutterwave is not configured on server")
+        if not settings.flutterwave_redirect_url:
+            raise ValueError("Missing FLUTTERWAVE_REDIRECT_URL")
+        plan = self.repo.get_activation_plan_by_code(plan_code)
+        if not plan or not plan.get("is_active"):
+            raise ValueError("Invalid or inactive plan")
+
+        tx_ref = f"act_{secrets.token_urlsafe(12)}"
+        amount = int(plan["price_kobo"]) / 100
+        customer_name = f"{user.get('first_name') or ''} {user.get('last_name') or ''}".strip() or "Campus101 User"
+        customer_email = (user.get("email") or "").strip() or f"{user['id']}@campus101.local"
+        payload = {
+            "tx_ref": tx_ref,
+            "amount": amount,
+            "currency": "NGN",
+            "redirect_url": settings.flutterwave_redirect_url,
+            "customer": {
+                "email": customer_email,
+                "phonenumber": user.get("phone") or "",
+                "name": customer_name,
+            },
+            "meta": {
+                "user_id": user["id"],
+                "plan_code": plan["code"],
+            },
+            "customizations": {
+                "title": "Campus101 Activation",
+                "description": f"{plan['name']} activation",
+            },
+        }
+        req = urlrequest.Request(
+            "https://api.flutterwave.com/v3/payments",
+            data=json.dumps(payload).encode("utf-8"),
+            headers={
+                "Authorization": f"Bearer {settings.flutterwave_secret_key}",
+                "Content-Type": "application/json",
+            },
+            method="POST",
+        )
+        try:
+            with urlrequest.urlopen(req, timeout=30) as res:
+                body = json.loads(res.read().decode("utf-8"))
+        except Exception as exc:
+            raise ValueError(f"Flutterwave checkout creation failed: {exc}") from exc
+
+        if body.get("status") != "success":
+            raise ValueError(f"Flutterwave error: {body.get('message') or 'unknown'}")
+        link = ((body.get("data") or {}).get("link") or "").strip()
+        if not link:
+            raise ValueError("Flutterwave did not return checkout link")
+
+        self.repo.create_pending_activation(
+            user_id=user["id"],
+            plan_id=int(plan["id"]),
+            tx_ref=tx_ref,
+        )
+        return {"checkout_url": link, "tx_ref": tx_ref}
+
+    def verify_flutterwave_and_activate(self, *, tx_ref: str, transaction_id: int) -> Dict[str, Any]:
+        activation = self.repo.get_activation_by_reference(tx_ref)
+        if not activation:
+            raise ValueError("Unknown payment reference")
+        if activation.get("status") == "active":
+            return {"status": "already_active"}
+
+        settings = get_settings()
+        if not settings.flutterwave_secret_key:
+            raise ValueError("Flutterwave is not configured on server")
+        req = urlrequest.Request(
+            f"https://api.flutterwave.com/v3/transactions/{transaction_id}/verify",
+            headers={
+                "Authorization": f"Bearer {settings.flutterwave_secret_key}",
+            },
+            method="GET",
+        )
+        try:
+            with urlrequest.urlopen(req, timeout=30) as res:
+                body = json.loads(res.read().decode("utf-8"))
+        except Exception as exc:
+            raise ValueError(f"Flutterwave verify failed: {exc}") from exc
+
+        if body.get("status") != "success":
+            raise ValueError("Flutterwave verification not successful")
+        data = body.get("data") or {}
+        if str(data.get("tx_ref") or "") != tx_ref:
+            raise ValueError("Payment reference mismatch")
+        if str(data.get("currency") or "").upper() != "NGN":
+            raise ValueError("Invalid payment currency")
+        if str(data.get("status") or "").lower() != "successful":
+            raise ValueError("Payment not successful")
+
+        plan = self.repo.get_activation_plan_by_id(int(activation["plan_id"]))
+        if not plan:
+            raise ValueError("Activation plan not found")
+        expected_amount = int(plan["price_kobo"]) / 100
+        paid_amount = float(data.get("amount") or 0)
+        if abs(paid_amount - expected_amount) > 0.01:
+            raise ValueError("Payment amount mismatch")
+        now = datetime.now(timezone.utc)
+        latest_active = self.repo.get_latest_active_activation(activation["user_id"])
+        base_start = now
+        if latest_active:
+            ends_at = latest_active.get("ends_at")
+            if ends_at:
+                try:
+                    end_dt = datetime.fromisoformat(str(ends_at).replace("Z", "+00:00"))
+                    if end_dt > now:
+                        base_start = end_dt
+                except ValueError:
+                    pass
+            self.repo.expire_active_activations(activation["user_id"])
+
+        starts_at = base_start
+        ends_at = starts_at + timedelta(days=int(plan.get("duration_days") or 30))
+        self.repo.mark_activation_active(
+            activation_id=activation["id"],
+            starts_at_iso=starts_at.isoformat(),
+            ends_at_iso=ends_at.isoformat(),
+        )
+        return {"status": "activated", "starts_at": starts_at.isoformat(), "ends_at": ends_at.isoformat()}
 

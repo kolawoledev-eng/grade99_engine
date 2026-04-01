@@ -35,3 +35,7 @@ class LoginRequest(BaseModel):
 class DeleteAccountRequest(BaseModel):
     password: str = Field(..., min_length=8, max_length=200)
 
+
+class ActivationCheckoutRequest(BaseModel):
+    plan_code: str = Field(..., min_length=3, max_length=40)
+

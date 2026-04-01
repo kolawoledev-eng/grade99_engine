@@ -2,9 +2,17 @@ from __future__ import annotations
 
 from typing import Any, Dict, Optional
 
-from fastapi import APIRouter, Header, HTTPException
+import json
 
-from app.features.auth.schemas import DeleteAccountRequest, LoginRequest, RegisterRequest
+from fastapi import APIRouter, Header, HTTPException, Request
+
+from app.core.config import get_settings
+from app.features.auth.schemas import (
+    ActivationCheckoutRequest,
+    DeleteAccountRequest,
+    LoginRequest,
+    RegisterRequest,
+)
 from app.features.auth.service import AuthService
 
 router = APIRouter(prefix="/api", tags=["auth"])
@@ -131,6 +139,56 @@ async def activation_status(authorization: Optional[str] = Header(default=None))
     if not user:
         raise HTTPException(status_code=401, detail="Invalid or expired session")
     return {"status": "success", "activation": svc.activation_status(user["id"])}
+
+
+@router.post("/activation/checkout")
+async def activation_checkout(
+    payload: ActivationCheckoutRequest,
+    authorization: Optional[str] = Header(default=None),
+) -> Dict[str, Any]:
+    token = _read_bearer(authorization)
+    svc = AuthService()
+    user = svc.user_from_token(token)
+    if not user:
+        raise HTTPException(status_code=401, detail="Invalid or expired session")
+    try:
+        result = svc.create_flutterwave_checkout(user=user, plan_code=payload.plan_code.strip())
+        return {"status": "success", **result}
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@router.post("/activation/webhook/flutterwave")
+async def flutterwave_webhook(
+    request: Request,
+    verif_hash: Optional[str] = Header(default=None, alias="verif-hash"),
+) -> Dict[str, str]:
+    settings = get_settings()
+    expected_hash = (settings.flutterwave_secret_hash or "").strip()
+    if not expected_hash:
+        raise HTTPException(status_code=503, detail="Webhook hash is not configured")
+    if (verif_hash or "").strip() != expected_hash:
+        raise HTTPException(status_code=401, detail="Invalid webhook signature")
+
+    raw = await request.body()
+    try:
+        event = json.loads(raw.decode("utf-8"))
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"Invalid webhook payload: {exc}") from exc
+    data = event.get("data") or {}
+    tx_ref = str(data.get("tx_ref") or "").strip()
+    transaction_id = data.get("id")
+    if not tx_ref or not transaction_id:
+        raise HTTPException(status_code=400, detail="Missing tx_ref or transaction id")
+    try:
+        AuthService().verify_flutterwave_and_activate(tx_ref=tx_ref, transaction_id=int(transaction_id))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    return {"status": "ok"}
 
 
 @router.delete("/auth/account")
