@@ -1,0 +1,153 @@
+from __future__ import annotations
+
+from typing import Any, Dict, Optional
+
+from fastapi import APIRouter, Header, HTTPException
+
+from app.features.auth.schemas import DeleteAccountRequest, LoginRequest, RegisterRequest
+from app.features.auth.service import AuthService
+
+router = APIRouter(prefix="/api", tags=["auth"])
+
+
+def _read_bearer(authorization: Optional[str]) -> str:
+    if not authorization:
+        raise HTTPException(status_code=401, detail="Missing authorization header")
+    parts = authorization.split(" ", 1)
+    if len(parts) != 2 or parts[0].lower() != "bearer" or not parts[1].strip():
+        raise HTTPException(status_code=401, detail="Invalid authorization header")
+    return parts[1].strip()
+
+
+def _safe_user(user: Dict[str, Any], access: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    payload = {
+        "id": user.get("id"),
+        "first_name": user.get("first_name"),
+        "last_name": user.get("last_name"),
+        "phone": user.get("phone"),
+        "email": user.get("email"),
+    }
+    if access:
+        payload["activation_status"] = access.get("activation_status")
+        payload["activation_ends_at"] = access.get("activation_ends_at")
+    return payload
+
+
+@router.post("/auth/register")
+async def register(payload: RegisterRequest) -> Dict[str, Any]:
+    try:
+        svc = AuthService()
+        result = svc.register(
+            first_name=payload.first_name,
+            last_name=payload.last_name,
+            phone=payload.phone,
+            email=payload.email,
+            password=payload.password,
+        )
+        return {
+            "status": "success",
+            "user": _safe_user(result["user"], result["access"]),
+            "token": result["token"],
+            "access": {
+                "is_activated": result["access"]["is_activated"],
+                "free_question_limit": result["access"]["free_question_limit"],
+            },
+        }
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@router.post("/auth/login")
+async def login(payload: LoginRequest) -> Dict[str, Any]:
+    try:
+        svc = AuthService()
+        result = svc.login(identifier=payload.identifier, password=payload.password)
+        return {
+            "status": "success",
+            "user": _safe_user(result["user"], result["access"]),
+            "token": result["token"],
+            "access": {
+                "is_activated": result["access"]["is_activated"],
+                "free_question_limit": result["access"]["free_question_limit"],
+            },
+        }
+    except ValueError as exc:
+        raise HTTPException(status_code=401, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@router.post("/auth/logout")
+async def logout(authorization: Optional[str] = Header(default=None)) -> Dict[str, str]:
+    try:
+        token = _read_bearer(authorization)
+        AuthService().logout(token)
+        return {"status": "success"}
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@router.get("/auth/me")
+async def me(authorization: Optional[str] = Header(default=None)) -> Dict[str, Any]:
+    token = _read_bearer(authorization)
+    svc = AuthService()
+    user = svc.user_from_token(token)
+    if not user:
+        raise HTTPException(status_code=401, detail="Invalid or expired session")
+    access = svc.access_state(user["id"])
+    return {"status": "success", "user": _safe_user(user, access)}
+
+
+@router.get("/auth/access")
+async def access(authorization: Optional[str] = Header(default=None)) -> Dict[str, Any]:
+    token = _read_bearer(authorization)
+    svc = AuthService()
+    user = svc.user_from_token(token)
+    if not user:
+        raise HTTPException(status_code=401, detail="Invalid or expired session")
+    payload = svc.access_state(user["id"])
+    return {
+        "status": "success",
+        "is_activated": payload["is_activated"],
+        "free_question_limit": payload["free_question_limit"],
+        "blocked_message": "Activate for unlimited access",
+    }
+
+
+@router.get("/activation/plans")
+async def activation_plans() -> Dict[str, Any]:
+    return {"status": "success", "plans": AuthService().list_plans()}
+
+
+@router.get("/activation/status")
+async def activation_status(authorization: Optional[str] = Header(default=None)) -> Dict[str, Any]:
+    token = _read_bearer(authorization)
+    svc = AuthService()
+    user = svc.user_from_token(token)
+    if not user:
+        raise HTTPException(status_code=401, detail="Invalid or expired session")
+    return {"status": "success", "activation": svc.activation_status(user["id"])}
+
+
+@router.delete("/auth/account")
+async def delete_account(
+    payload: DeleteAccountRequest,
+    authorization: Optional[str] = Header(default=None),
+) -> Dict[str, str]:
+    token = _read_bearer(authorization)
+    svc = AuthService()
+    user = svc.user_from_token(token)
+    if not user:
+        raise HTTPException(status_code=401, detail="Invalid or expired session")
+    try:
+        svc.delete_account(user["id"], payload.password)
+        return {"status": "success"}
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+

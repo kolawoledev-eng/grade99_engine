@@ -6,10 +6,11 @@ import random
 import re
 from typing import Any, Dict, List, Optional, Set, Tuple
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, Header, HTTPException, Query
 
 from app.core.admin_auth import verify_admin_key
 from app.core.db import get_supabase_client
+from app.features.auth.service import AuthService
 from app.features.practice.backfill import run_download_pack_backfill
 from app.features.practice.bucket_ensure import run_ensure_national_buckets
 from app.features.practice.past_ingest import insert_past_questions_batch
@@ -351,18 +352,34 @@ async def practice_session(
     difficulty: str = Query(...),
     topic: Optional[str] = Query(default=None),
     limit: int = Query(default=20, ge=1, le=100),
+    authorization: Optional[str] = Header(default=None),
 ) -> Dict[str, Any]:
     """
     Build a practice set: prefer rows from past_questions, then generated_questions.
     All returned questions are unique by stem+options fingerprint (past first, then generated).
     """
     try:
+        free_question_limit = 5
+        is_activated = False
+        auth_user_id: Optional[str] = None
+        if authorization:
+            parts = authorization.split(" ", 1)
+            if len(parts) == 2 and parts[0].lower() == "bearer":
+                token = parts[1].strip()
+                if token:
+                    auth_svc = AuthService()
+                    user = auth_svc.user_from_token(token)
+                    if user:
+                        auth_user_id = user.get("id")
+                        is_activated = bool(auth_svc.access_state(user["id"]).get("is_activated"))
+
+        effective_limit = limit if is_activated else min(limit, free_question_limit)
         supabase = get_supabase_client()
         exu = exam.upper()
         past, gen = _merge_jamb_use_of_english_bucket(
-            supabase, exu, year, subject, difficulty, limit, topic=topic
+            supabase, exu, year, subject, difficulty, effective_limit, topic=topic
         )
-        past, gen = _finalize_unique_past_then_generated(past, gen, limit)
+        past, gen = _finalize_unique_past_then_generated(past, gen, effective_limit)
 
         combined = past + gen
         auto_note: Optional[str] = None
@@ -372,17 +389,38 @@ async def practice_session(
                 year=year,
                 subject=subject,
                 topic=topic,
-                limit=limit,
+                limit=effective_limit,
             )
             if auto_errors:
                 auto_note = f"partial generation notes: {auto_errors}"
         random.shuffle(combined)
+        if auth_user_id:
+            try:
+                supabase.table("practice_attempts").insert(
+                    {
+                        "user_id": auth_user_id,
+                        "exam": exu,
+                        "year": year,
+                        "subject": subject,
+                        "difficulty": difficulty,
+                        "requested_limit": limit,
+                        "served_limit": min(len(combined), effective_limit),
+                        "blocked_at_question": (free_question_limit + 1) if not is_activated and limit > free_question_limit else None,
+                        "is_activated_at_request": is_activated,
+                    }
+                ).execute()
+            except Exception:
+                # Non-blocking analytics insert.
+                pass
         payload: Dict[str, Any] = {
             "status": "success",
             "count": len(combined),
             "past_count": len(past),
             "generated_count": len(gen),
-            "questions": combined[:limit],
+            "questions": combined[:effective_limit],
+            "is_activated": is_activated,
+            "free_question_limit": free_question_limit,
+            "paywall_trigger_question": free_question_limit + 1,
         }
         if auto_note is not None:
             payload["auto_generation_note"] = auto_note

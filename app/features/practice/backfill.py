@@ -7,12 +7,24 @@ Uses existing QuestionGeneratorSupabase + quota rules (app.core.question_quota).
 from __future__ import annotations
 
 import logging
+import re
 from typing import Any, Dict, List
 
 from app.core.config import get_settings
 from app.services.question_generator import QuestionGeneratorSupabase
 
 logger = logging.getLogger(__name__)
+
+
+def _subject_key(name: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "", (name or "").strip().lower())
+
+
+def _generation_subject_aliases(exam: str, subject: str) -> List[str]:
+    # Generation validates against canonical subject names in `subjects`.
+    if exam.upper() == "JAMB" and _subject_key(subject) in {"useofenglish", "english"}:
+        return ["Use of English", "English"]
+    return [subject]
 
 
 def count_national_bucket_total(
@@ -111,6 +123,8 @@ def run_download_pack_backfill(
     diffs = ("easy", "medium", "hard")
     per_bucket: List[Dict[str, Any]] = []
     total_generated = 0
+    had_any_error = False
+    error_samples: List[str] = []
 
     try:
         generator = QuestionGeneratorSupabase(model=settings.anthropic_model or None)
@@ -157,15 +171,27 @@ def run_download_pack_backfill(
                 "error": None,
             }
             try:
-                rows = generator.generate_and_save(
-                    exam=ex,
-                    year=yr,
-                    subject=subject,
-                    difficulty=diff,
-                    topic="all topics",
-                    count=need,
-                    user_email=None,
-                )
+                rows = []
+                last_exc: Exception | None = None
+                for candidate_subject in _generation_subject_aliases(ex, subject):
+                    try:
+                        rows = generator.generate_and_save(
+                            exam=ex,
+                            year=yr,
+                            subject=candidate_subject,
+                            difficulty=diff,
+                            topic="all topics",
+                            count=need,
+                            user_email=None,
+                        )
+                        if rows:
+                            entry["subject_used"] = candidate_subject
+                        break
+                    except Exception as exc:  # try next alias
+                        last_exc = exc
+                        continue
+                if not rows and last_exc is not None:
+                    raise last_exc
                 n = len(rows)
                 entry["generated"] = n
                 total_generated += n
@@ -173,18 +199,30 @@ def run_download_pack_backfill(
                     entry["note"] = "generator returned no rows (quota, validation, or API failures)"
             except ValueError as exc:
                 entry["error"] = str(exc)
+                had_any_error = True
+                if len(error_samples) < 3:
+                    error_samples.append(f"{yr}/{diff}: {exc}")
             except Exception as exc:
                 logger.exception("download-pack backfill failed year=%s diff=%s", yr, diff)
                 entry["error"] = str(exc)
+                had_any_error = True
+                if len(error_samples) < 3:
+                    error_samples.append(f"{yr}/{diff}: {exc}")
 
             per_bucket.append(entry)
 
         if total_generated >= backfill_total_cap:
             break
 
+    reason: str | None = None
+    if total_generated == 0 and had_any_error:
+        reason = "generation failed across buckets: " + " | ".join(error_samples)
+    elif total_generated == 0:
+        reason = "no rows generated (quota/validation/API)"
+
     return {
         "ran": True,
-        "reason": None,
+        "reason": reason,
         "total_generated": total_generated,
         "per_bucket": per_bucket,
         "usage": {
