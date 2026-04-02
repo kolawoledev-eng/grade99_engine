@@ -14,6 +14,7 @@ from app.features.auth.api.routes import router as auth_router
 from app.features.novel_recommendation.api.literature_admin_routes import router as literature_admin_router
 from app.features.novel_recommendation.api.literature_routes import router as literature_public_router
 from app.features.novel_recommendation.api.routes import router as novels_router
+from app.features.leaderboard.api.routes import router as leaderboard_router
 from app.features.practice.api.routes import router as practice_router
 from app.features.questions.api.routes import router as questions_router
 from app.features.school_exams.api.routes import router as school_exams_router
@@ -121,6 +122,7 @@ app.include_router(novels_router)
 app.include_router(literature_public_router)
 app.include_router(literature_admin_router)
 app.include_router(practice_router)
+app.include_router(leaderboard_router)
 app.include_router(school_exams_router)
 app.include_router(tutor_router)
 

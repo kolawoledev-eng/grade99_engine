@@ -15,9 +15,85 @@ from app.features.practice.backfill import run_download_pack_backfill
 from app.features.practice.bucket_ensure import run_ensure_national_buckets
 from app.features.practice.past_ingest import insert_past_questions_batch
 from app.services.question_generator import QuestionGeneratorSupabase
-from app.schemas import BulkPastQuestionsRequest, EnsureBucketsRequest, PastQuestionRow
+from app.schemas import (
+    BulkPastQuestionsRequest,
+    EnsureBucketsRequest,
+    PastQuestionRow,
+    PracticeSessionResultCreate,
+)
 
 router = APIRouter(prefix="/api/practice", tags=["practice"])
+
+# National online practice: allowed exam years on stored questions (inclusive).
+_PRACTICE_YEAR_MIN = 2000
+_PRACTICE_YEAR_MAX = 2025
+
+
+def _default_practice_year_range() -> List[int]:
+    return list(range(_PRACTICE_YEAR_MIN, _PRACTICE_YEAR_MAX + 1))
+
+
+def _parse_years_query_param(raw: Optional[str]) -> List[int]:
+    if not raw or not str(raw).strip():
+        return []
+    s = str(raw).strip()
+    if s.lower() == "all":
+        return _default_practice_year_range()
+    out: List[int] = []
+    for part in s.split(","):
+        p = part.strip()
+        if p.isdigit():
+            y = int(p)
+            if _PRACTICE_YEAR_MIN <= y <= _PRACTICE_YEAR_MAX:
+                out.append(y)
+    return sorted(set(out))
+
+
+def _resolve_session_years(
+    *,
+    is_activated: bool,
+    year: Optional[int],
+    years_param: Optional[str],
+) -> List[int]:
+    """Free tier always gets the full year range (client year filters are ignored)."""
+    if not is_activated:
+        return _default_practice_year_range()
+    ys = _parse_years_query_param(years_param)
+    if ys:
+        return ys
+    if year is not None and _PRACTICE_YEAR_MIN <= year <= _PRACTICE_YEAR_MAX:
+        return [year]
+    if year is not None:
+        return _default_practice_year_range()
+    return _default_practice_year_range()
+
+
+def _effective_session_difficulty(
+    *,
+    is_activated: bool,
+    difficulty: str,
+    topic_normalized: Optional[str],
+) -> str:
+    """Free users: mixed difficulty unless a specific topic is requested (e.g. classroom drill)."""
+    raw = (difficulty or "medium").strip().lower()
+    if not is_activated:
+        if topic_normalized is not None:
+            if raw in ("easy", "medium", "hard"):
+                return raw
+            if raw == "general":
+                return "general"
+            return "medium"
+        return "general"
+    if raw in ("easy", "medium", "hard", "general"):
+        return raw
+    return "medium"
+
+
+def _normalize_session_topic(topic: Optional[str]) -> Optional[str]:
+    if not topic or str(topic).strip().lower() in ("", "all topics"):
+        return None
+    return topic
+
 
 # Practice session: past + generated share MCQ columns; only past_questions has source_label.
 _MCQ_FIELDS = (
@@ -402,12 +478,137 @@ def _merge_jamb_use_of_english_bucket(
     return past, gen
 
 
+def _merge_jamb_bucket_multi_year(
+    supabase: Any,
+    exam: str,
+    years: List[int],
+    subject: str,
+    difficulty: str,
+    past_target: int,
+    gen_target: int,
+    topic: Optional[str] = None,
+) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    """Round-robin across exam years until past/gen targets are met (deduped)."""
+    if not years:
+        return [], []
+    if len(years) == 1:
+        return _merge_jamb_use_of_english_bucket(
+            supabase,
+            exam,
+            years[0],
+            subject,
+            difficulty,
+            past_target,
+            gen_target,
+            topic=topic,
+        )
+
+    past_out: List[Dict[str, Any]] = []
+    gen_out: List[Dict[str, Any]] = []
+    seen: Set[str] = set()
+    y_order = list(years)
+    random.shuffle(y_order)
+    n_y = len(y_order)
+    per_round_p = (
+        max(2, min(12, past_target // max(3, n_y) + 2)) if past_target > 0 else 0
+    )
+    per_round_g = (
+        max(2, min(12, gen_target // max(3, n_y) + 2)) if gen_target > 0 else 0
+    )
+    yi = 0
+    for _ in range(120):
+        if len(past_out) >= past_target and len(gen_out) >= gen_target:
+            break
+        progressed = False
+        for _step in range(n_y):
+            if len(past_out) >= past_target and len(gen_out) >= gen_target:
+                break
+            yr = y_order[yi % n_y]
+            yi += 1
+            need_p = past_target - len(past_out)
+            need_g = gen_target - len(gen_out)
+            rp = min(per_round_p, need_p) if need_p > 0 else 0
+            rg = min(per_round_g, need_g) if need_g > 0 else 0
+            if rp <= 0 and rg <= 0:
+                break
+            p, g = _merge_jamb_use_of_english_bucket(
+                supabase, exam, yr, subject, difficulty, rp, rg, topic=topic
+            )
+            for row in p:
+                if len(past_out) >= past_target:
+                    break
+                fp = _question_fingerprint(row)
+                if fp in seen:
+                    continue
+                seen.add(fp)
+                past_out.append(row)
+                progressed = True
+            for row in g:
+                if len(gen_out) >= gen_target:
+                    break
+                fp = _question_fingerprint(row)
+                if fp in seen:
+                    continue
+                seen.add(fp)
+                gen_out.append(row)
+                progressed = True
+        if not progressed:
+            break
+    return past_out, gen_out
+
+
+def _session_collect_mixed_general(
+    supabase: Any,
+    exam: str,
+    years: List[int],
+    subject: str,
+    past_target: int,
+    gen_target: int,
+    topic: Optional[str] = None,
+) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    """Blend easy / medium / hard when difficulty=general (free tier default)."""
+    seen: Set[str] = set()
+    past_all: List[Dict[str, Any]] = []
+    gen_all: List[Dict[str, Any]] = []
+    pmap = dict(_difficulty_split(past_target)) if past_target > 0 else {}
+    gmap = dict(_difficulty_split(gen_target)) if gen_target > 0 else {}
+    diffs = sorted(set(pmap.keys()) | set(gmap.keys()))
+    for diff in diffs:
+        pc = pmap.get(diff, 0)
+        gc = gmap.get(diff, 0)
+        if pc <= 0 and gc <= 0:
+            continue
+        p, g = _merge_jamb_bucket_multi_year(
+            supabase, exam, years, subject, diff, pc, gc, topic=topic
+        )
+        for row in p:
+            fp = _question_fingerprint(row)
+            if fp in seen:
+                continue
+            seen.add(fp)
+            past_all.append(row)
+        for row in g:
+            fp = _question_fingerprint(row)
+            if fp in seen:
+                continue
+            seen.add(fp)
+            gen_all.append(row)
+    return past_all, gen_all
+
+
 @router.get("/session")
 async def practice_session(
     exam: str = Query(...),
-    year: int = Query(...),
     subject: str = Query(...),
     difficulty: str = Query(...),
+    year: Optional[int] = Query(
+        default=None,
+        description="Single exam year (subscribers). Optional if years= is set.",
+    ),
+    years: Optional[str] = Query(
+        default=None,
+        description="Comma-separated years or 'all' (2000–2025). Subscribers only; free tier ignores.",
+    ),
     topic: Optional[str] = Query(default=None),
     limit: int = Query(default=20, ge=1, le=100),
     authorization: Optional[str] = Header(default=None),
@@ -416,6 +617,13 @@ async def practice_session(
     Build a practice set: mix past_questions and generated_questions (~70/30 by default,
     PRACTICE_PAST_RATIO). Questions are unique by stem+options fingerprint; if one pool is
     short, the other fills remaining slots.
+
+    Free (unactivated) users: always draw from all years 2000–2025 and mixed difficulty
+    (easy/medium/hard), regardless of year/years/difficulty query params — so older app
+    builds keep working while the pool is wider.
+
+    Subscribers: optional ``years`` (or legacy ``year``) and difficulty including
+    ``general`` for a mixed split.
     """
     try:
         free_question_limit = 5
@@ -430,43 +638,88 @@ async def practice_session(
                     user = auth_svc.user_from_token(token)
                     if user:
                         auth_user_id = user.get("id")
-                        is_activated = bool(auth_svc.access_state(user["id"]).get("is_activated"))
+                        is_activated = bool(
+                            auth_svc.access_state(user["id"]).get("is_activated")
+                        )
 
         effective_limit = limit if is_activated else min(limit, free_question_limit)
         supabase = get_supabase_client()
         exu = exam.upper()
+        topic_eff = _normalize_session_topic(topic)
+        resolved_years = _resolve_session_years(
+            is_activated=is_activated,
+            year=year,
+            years_param=years,
+        )
+        diff_eff = _effective_session_difficulty(
+            is_activated=is_activated,
+            difficulty=difficulty,
+            topic_normalized=topic_eff,
+        )
         ratio = _practice_past_ratio()
         past_target, gen_target = _split_past_gen_targets(effective_limit, ratio)
-        past, gen = _merge_jamb_use_of_english_bucket(
-            supabase, exu, year, subject, difficulty, past_target, gen_target, topic=topic
+        if diff_eff == "general":
+            past, gen = _session_collect_mixed_general(
+                supabase,
+                exu,
+                resolved_years,
+                subject,
+                past_target,
+                gen_target,
+                topic=topic_eff,
+            )
+        else:
+            past, gen = _merge_jamb_bucket_multi_year(
+                supabase,
+                exu,
+                resolved_years,
+                subject,
+                diff_eff,
+                past_target,
+                gen_target,
+                topic=topic_eff,
+            )
+        past, gen = _finalize_past_generated_ratio(
+            past, gen, effective_limit, ratio
         )
-        past, gen = _finalize_past_generated_ratio(past, gen, effective_limit, ratio)
 
         combined = past + gen
         auto_note: Optional[str] = None
         if not combined:
+            gen_year = (
+                resolved_years[0]
+                if len(resolved_years) == 1
+                else random.choice(resolved_years)
+            )
             combined, auto_errors = _auto_generate_national_mix(
                 exam=exu,
-                year=year,
+                year=gen_year,
                 subject=subject,
-                topic=topic,
+                topic=topic_eff,
                 limit=effective_limit,
             )
             if auto_errors:
                 auto_note = f"partial generation notes: {auto_errors}"
         random.shuffle(combined)
+        analytics_year = (
+            resolved_years[0]
+            if len(resolved_years) == 1
+            else _PRACTICE_YEAR_MIN
+        )
         if auth_user_id:
             try:
                 supabase.table("practice_attempts").insert(
                     {
                         "user_id": auth_user_id,
                         "exam": exu,
-                        "year": year,
+                        "year": analytics_year,
                         "subject": subject,
-                        "difficulty": difficulty,
+                        "difficulty": diff_eff,
                         "requested_limit": limit,
                         "served_limit": min(len(combined), effective_limit),
-                        "blocked_at_question": (free_question_limit + 1) if not is_activated and limit > free_question_limit else None,
+                        "blocked_at_question": (free_question_limit + 1)
+                        if not is_activated and limit > free_question_limit
+                        else None,
                         "is_activated_at_request": is_activated,
                     }
                 ).execute()
@@ -482,10 +735,14 @@ async def practice_session(
             "is_activated": is_activated,
             "free_question_limit": free_question_limit,
             "paywall_trigger_question": free_question_limit + 1,
+            "practice_years": resolved_years,
+            "difficulty_applied": diff_eff,
         }
         if auto_note is not None:
             payload["auto_generation_note"] = auto_note
         return payload
+    except HTTPException:
+        raise
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
@@ -653,3 +910,46 @@ async def download_pack(
         raise
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@router.post("/session-result")
+async def submit_practice_session_result(
+    payload: PracticeSessionResultCreate,
+    authorization: Optional[str] = Header(default=None),
+) -> Dict[str, Any]:
+    """
+    Record one finished national practice session (correct / total) for leaderboards.
+    Requires Bearer token. School / institution practice should not call this.
+    """
+    if not authorization:
+        raise HTTPException(status_code=401, detail="Authorization required")
+    parts = authorization.split(" ", 1)
+    if len(parts) != 2 or parts[0].lower() != "bearer" or not parts[1].strip():
+        raise HTTPException(status_code=401, detail="Invalid authorization")
+    auth_svc = AuthService()
+    user = auth_svc.user_from_token(parts[1].strip())
+    if not user or not user.get("id"):
+        raise HTTPException(status_code=401, detail="Invalid token")
+    uid = str(user["id"])
+    exu = payload.exam.strip().upper()
+    subj = payload.subject.strip()
+    if not subj:
+        raise HTTPException(status_code=400, detail="subject is required")
+    score_pct = round(100.0 * payload.correct_count / payload.total_count, 3)
+    diff = (payload.difficulty or "").strip()[:20] or None
+    row: Dict[str, Any] = {
+        "user_id": uid,
+        "exam": exu,
+        "subject": subj[:120],
+        "year": payload.year,
+        "difficulty": diff,
+        "practise_mode": payload.practise_mode,
+        "correct_count": payload.correct_count,
+        "total_count": payload.total_count,
+        "score_pct": score_pct,
+    }
+    try:
+        get_supabase_client().table("practice_session_results").insert(row).execute()
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    return {"status": "success"}

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import List, Literal, Optional
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 
 class GenerateRequest(BaseModel):
@@ -93,5 +93,23 @@ class EnsureBucketsRequest(BaseModel):
         description="If set, only these syllabus topic names (exact match)",
     )
     user_email: Optional[str] = None
+
+
+class PracticeSessionResultCreate(BaseModel):
+    """Client-submitted summary after a finished national practice session (leaderboard input)."""
+
+    exam: str
+    subject: str
+    year: Optional[int] = Field(default=None, ge=2000, le=2100)
+    difficulty: Optional[str] = None
+    practise_mode: Literal["exam", "study"]
+    correct_count: int = Field(..., ge=0)
+    total_count: int = Field(..., ge=1, le=200)
+
+    @model_validator(mode="after")
+    def counts_ok(self) -> "PracticeSessionResultCreate":
+        if self.correct_count > self.total_count:
+            raise ValueError("correct_count cannot exceed total_count")
+        return self
 
 
