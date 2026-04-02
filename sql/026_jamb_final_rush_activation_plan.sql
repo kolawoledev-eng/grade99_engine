@@ -1,7 +1,7 @@
 -- JAMB FINAL RUSH activation plan (2 weeks)
 -- This plan is used for the “immediate launch” offer.
 
--- Create/Upsert plan and disable the others.
+-- Create/Upsert plan (keep other plans available too).
 insert into activation_plans (code, name, duration_days, price_kobo, is_active)
 values
   (
@@ -17,8 +17,8 @@ on conflict (code) do update set
   price_kobo = excluded.price_kobo,
   is_active = excluded.is_active;
 
--- Optional: ensure “only this plan” behavior immediately.
-update activation_plans
-set is_active = false
-where code in ('month_1', 'month_3', 'year_1');
+-- If you ever want “only this plan”, run this separately:
+-- update activation_plans
+-- set is_active = false
+-- where code in ('month_1', 'month_3', 'year_1');
 

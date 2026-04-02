@@ -30,6 +30,10 @@ class Settings:
     flutterwave_secret_key: str = ""
     flutterwave_secret_hash: str = ""
     flutterwave_redirect_url: str = ""
+    # Comma-separated Standard checkout methods (Flutterwave `payment_options`).
+    # Empty => server default so users see "how would you like to pay" (not card-only).
+    # Example: "card, account, banktransfer, ussd"
+    flutterwave_payment_options: str = ""
 
     @property
     def supabase_key(self) -> str:
@@ -68,6 +72,7 @@ def get_settings() -> Settings:
         flutterwave_secret_key=os.getenv("FLUTTERWAVE_SECRET_KEY", ""),
         flutterwave_secret_hash=os.getenv("FLUTTERWAVE_SECRET_HASH", ""),
         flutterwave_redirect_url=os.getenv("FLUTTERWAVE_REDIRECT_URL", ""),
+        flutterwave_payment_options=os.getenv("FLUTTERWAVE_PAYMENT_OPTIONS", ""),
     )
 
 

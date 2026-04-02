@@ -233,11 +233,21 @@ class AuthService:
         phone = f"{user.get('phone') or ''}".strip()
         if phone:
             customer["phone_number"] = phone
+        # Flutterwave Standard: `payment_options` controls which methods appear on the
+        # checkout page. Without it, many dashboards default to card-first UX.
+        # Comma + space separated list (see Flutterwave Payment Methods docs).
+        raw_opts = (settings.flutterwave_payment_options or "").strip()
+        if raw_opts:
+            payment_options = raw_opts
+        else:
+            # NGN: card, pay-with-bank (account), bank transfer, USSD — user picks method.
+            payment_options = "card, account, banktransfer, ussd"
         payload = {
             "tx_ref": tx_ref,
             "amount": amount,
             "currency": "NGN",
             "redirect_url": settings.flutterwave_redirect_url,
+            "payment_options": payment_options,
             "customer": customer,
             "meta": {
                 "user_id": user["id"],
@@ -258,7 +268,8 @@ class AuthService:
             method="POST",
         )
         try:
-            with urlrequest.urlopen(req, timeout=30) as res:
+            # Flutterwave + cold hosts can be slow; avoid failing checkout before the client gives up.
+            with urlrequest.urlopen(req, timeout=60) as res:
                 body = json.loads(res.read().decode("utf-8"))
         except HTTPError as exc:
             detail = exc.read().decode("utf-8", errors="replace")
